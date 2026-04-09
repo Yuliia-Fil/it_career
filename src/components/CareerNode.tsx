@@ -27,7 +27,7 @@ export const CareerNode = ({ data }: any) => {
   return (
     <div
       className={cn(
-        "px-5 py-4 transition-all duration-300 min-w-[240px] rounded-xl shadow-ambient relative",
+        "px-5 py-4 transition-all duration-300 w-[330px] rounded-xl shadow-ambient relative",
         isCurrent 
           ? "bg-primary text-on-primary" 
           : "bg-surface-container-low text-on-surface border border-outline-variant/10",

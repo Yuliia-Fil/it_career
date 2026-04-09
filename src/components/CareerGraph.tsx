@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import ReactFlow, { 
   Background, 
   Controls, 
@@ -8,17 +8,59 @@ import ReactFlow, {
   MarkerType,
   useNodesState,
   useEdgesState,
-  applyNodeChanges,
-  applyEdgeChanges,
-  NodeChange,
-  EdgeChange
+  Position as FlowPosition,
+  useReactFlow,
+  ReactFlowProvider,
+  useNodesInitialized
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { CareerNode } from './CareerNode';
 import { Position, Employee, MOCK_POSITIONS } from '@/src/types';
+import dagre from 'dagre';
 
 const nodeTypes = {
   careerNode: CareerNode,
+};
+
+const dagreGraph = new dagre.graphlib.Graph();
+dagreGraph.setDefaultEdgeLabel(() => ({}));
+
+// Standard dimensions as fallback
+const nodeWidth = 330;
+const nodeHeight = 150;
+
+const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => {
+  dagreGraph.setGraph({ rankdir: direction, ranksep: 120, nodesep: 150 });
+
+  nodes.forEach((node) => {
+    const width = node.width ?? nodeWidth;
+    const height = node.height ?? nodeHeight;
+    dagreGraph.setNode(node.id, { width, height });
+  });
+
+  edges.forEach((edge) => {
+    dagreGraph.setEdge(edge.source, edge.target);
+  });
+
+  dagre.layout(dagreGraph);
+
+  const layoutedNodes = nodes.map((node) => {
+    const nodeWithPosition = dagreGraph.node(node.id);
+    const width = node.width ?? nodeWidth;
+    const height = node.height ?? nodeHeight;
+
+    return {
+      ...node,
+      targetPosition: FlowPosition.Top,
+      sourcePosition: FlowPosition.Bottom,
+      position: {
+        x: nodeWithPosition.x - width / 2,
+        y: nodeWithPosition.y - height / 2,
+      },
+    };
+  });
+
+  return { nodes: layoutedNodes, edges };
 };
 
 interface CareerGraphProps {
@@ -26,10 +68,14 @@ interface CareerGraphProps {
   onNodeClick: (position: Position) => void;
 }
 
-export const CareerGraph = ({ employee, onNodeClick }: CareerGraphProps) => {
+const GraphInner = ({ employee, onNodeClick }: CareerGraphProps) => {
   const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(new Set());
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const { fitView } = useReactFlow();
+  
+  const [needsLayout, setNeedsLayout] = useState(true);
+  const nodesInitialized = useNodesInitialized({ includeHiddenNodes: false });
 
   const calculateMatch = useCallback((pos: Position) => {
     const totalReqs = pos.requirements.length;
@@ -47,11 +93,12 @@ export const CareerGraph = ({ employee, onNodeClick }: CareerGraphProps) => {
       else next.add(nodeId);
       return next;
     });
+    setNeedsLayout(true);
   }, []);
 
   useEffect(() => {
-    const visibleNodes: Node[] = [];
-    const visibleEdges: Edge[] = [];
+    const rawNodes: Node[] = [];
+    const rawEdges: Edge[] = [];
 
     const rootNode: Node = {
       id: 'root',
@@ -63,10 +110,11 @@ export const CareerGraph = ({ employee, onNodeClick }: CareerGraphProps) => {
         isCollapsed: collapsedNodes.has('root'),
         onToggleCollapse: () => toggleCollapse('root')
       },
-      position: { x: 400, y: -150 },
+      position: { x: 0, y: 0 },
       draggable: true,
+      style: { opacity: 0 }, // invisible but measured
     };
-    visibleNodes.push(rootNode);
+    rawNodes.push(rootNode);
 
     if (!collapsedNodes.has('root')) {
       const dynamicEdges: Edge[] = MOCK_POSITIONS.map(pos => {
@@ -76,6 +124,7 @@ export const CareerGraph = ({ employee, onNodeClick }: CareerGraphProps) => {
             source: pos.parentId,
             target: pos.id,
             markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-outline-variant)' },
+            animated: true,
             style: { stroke: 'var(--color-outline-variant)', strokeWidth: 2 }
           };
         }
@@ -84,20 +133,12 @@ export const CareerGraph = ({ employee, onNodeClick }: CareerGraphProps) => {
           source: 'root',
           target: pos.id,
           animated: true,
+          markerEnd: { type: MarkerType.ArrowClosed, color: 'var(--color-outline-variant)' },
           style: { stroke: 'var(--color-outline-variant)', strokeWidth: 2 }
         };
       });
 
-      const getLevel = (id: string): number => {
-        const pos = MOCK_POSITIONS.find(p => p.id === id);
-        if (!pos || !pos.parentId) return 0;
-        return 1 + getLevel(pos.parentId);
-      };
-
-      // Group positions by level to calculate X better
-      const levels: Record<number, Position[]> = {};
       MOCK_POSITIONS.forEach(pos => {
-        // Visibility check
         let currentParent = pos.parentId || 'root';
         let hiddenByAncestor = false;
         while (currentParent) {
@@ -110,16 +151,7 @@ export const CareerGraph = ({ employee, onNodeClick }: CareerGraphProps) => {
         }
 
         if (!hiddenByAncestor) {
-          const level = getLevel(pos.id);
-          if (!levels[level]) levels[level] = [];
-          levels[level].push(pos);
-        }
-      });
-
-      Object.entries(levels).forEach(([levelStr, posList]) => {
-        const level = parseInt(levelStr);
-        posList.forEach((pos, idx) => {
-          visibleNodes.push({
+          rawNodes.push({
             id: pos.id,
             type: 'careerNode',
             data: { 
@@ -134,27 +166,45 @@ export const CareerGraph = ({ employee, onNodeClick }: CareerGraphProps) => {
               isCollapsed: collapsedNodes.has(pos.id),
               onToggleCollapse: () => toggleCollapse(pos.id)
             },
-            position: { 
-              x: 400 + (idx - (posList.length - 1) / 2) * 350, 
-              y: level * 250 
-            },
+            position: { x: 0, y: 0 },
             draggable: true,
+            style: { opacity: 0 },
           });
-        });
+        }
       });
 
       dynamicEdges.forEach(edge => {
-        const sourceVisible = visibleNodes.some(n => n.id === edge.source);
-        const targetVisible = visibleNodes.some(n => n.id === edge.target);
+        const sourceVisible = rawNodes.some(n => n.id === edge.source);
+        const targetVisible = rawNodes.some(n => n.id === edge.target);
         if (sourceVisible && targetVisible) {
-          visibleEdges.push(edge);
+          rawEdges.push(edge);
         }
       });
     }
 
-    setNodes(visibleNodes);
-    setEdges(visibleEdges);
+    setNodes(rawNodes);
+    setEdges(rawEdges);
+    setNeedsLayout(true);
   }, [collapsedNodes, employee, toggleCollapse, calculateMatch, setNodes, setEdges]);
+
+  useEffect(() => {
+    if (nodesInitialized && needsLayout && nodes.length > 0) {
+      const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
+        nodes,
+        edges
+      );
+      
+      const visibleNodes = layoutedNodes.map(n => ({...n, style: { opacity: 1, transition: 'opacity 0.2s' }}));
+      
+      setNodes(visibleNodes);
+      setEdges(layoutedEdges);
+      setNeedsLayout(false);
+      
+      window.requestAnimationFrame(() => {
+        fitView({ padding: 0.2, duration: 800 });
+      });
+    }
+  }, [nodesInitialized, needsLayout, nodes, edges, setNodes, setEdges, fitView]);
 
   const onNodeClickHandler = useCallback((event: React.MouseEvent, node: Node) => {
     if (node.data.position) {
@@ -179,5 +229,13 @@ export const CareerGraph = ({ employee, onNodeClick }: CareerGraphProps) => {
         <Controls />
       </ReactFlow>
     </div>
+  );
+};
+
+export const CareerGraph = (props: CareerGraphProps) => {
+  return (
+    <ReactFlowProvider>
+      <GraphInner {...props} />
+    </ReactFlowProvider>
   );
 };
